@@ -7,6 +7,10 @@ The application uses the DRM1000's 921,600-baud UART through a host virtual
 serial adapter. It provides the same controls through a native `egui` desktop
 interface and command-line subcommands.
 
+## Screenshot
+
+![DRM1000 GUI running on Linux](images/drm1000-gui.png)
+
 ## Features
 
 - Frequency entry in Hz, kHz, or MHz and direct tuning
