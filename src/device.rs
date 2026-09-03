@@ -77,6 +77,10 @@ impl DeviceConnection {
     }
 
     pub async fn initialise(&mut self, timeout: Duration) -> Result<()> {
+        self.send(&Request::byte(opcode::STATUS_OUTPUT, 0)).await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = self.stream.clear(ClearBuffer::Input);
+        self.decoder = FrameDecoder::default();
         let frame = self
             .transact(&Request::new(opcode::UART_INIT), timeout)
             .await?;

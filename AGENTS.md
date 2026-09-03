@@ -38,6 +38,17 @@ broadcast receiver module. It targets Linux, Windows, and macOS.
   The main receiver uses a separate nominal 3.1 V supply on pin 7. The host
   must not drive pin 33 before the module supply is stable.
 - Preserve the guarded register-write UX: GUI checkbox and CLI `--confirm`.
+- Update frequency and volume editors only when their corresponding readback
+  generation changes. Periodic status snapshots must not overwrite active user
+  edits. A dirty frequency draft remains authoritative until Tune is submitted.
+- Preserve legacy scan support for firmware `v0.17`: poll demodulator mode and
+  station results while treating scanner error 13 as an expected in-progress
+  response and no-station error 4 as completion. Scanner percentage is
+  optional.
+- Disable persistent status/text output on clean disconnect and quiesce stale
+  status output before sending `UART_INIT` on a new connection.
+- The module audio test tone works only in AM mode. Do not present it as
+  available at VHF, where analogue mode resolves to FM.
 - Do not add firmware flashing without an authenticated vendor image and the
   matching documented update process.
 - The hardware probe on 2026-09-03 reported firmware
@@ -58,7 +69,8 @@ cargo check --target x86_64-pc-windows-gnu
 ```
 
 Protocol tests should retain coverage for fragmented/noisy framing, the fixed
-409-byte status payload, and scan label-table indexing.
+409-byte status payload, scan label-table indexing, field-specific editor
+generations, and legacy scan completion.
 
 ## Repository Hygiene
 

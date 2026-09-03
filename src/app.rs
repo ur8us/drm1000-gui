@@ -12,7 +12,11 @@ pub struct Drm1000App {
     snapshot: SerialSnapshot,
     selected_port: String,
     frequency: String,
+    frequency_dirty: bool,
+    frequency_generation: u64,
     volume: u8,
+    volume_generation: u64,
+    notice: Option<String>,
     register_address: String,
     register_value: String,
     register_write_armed: bool,
@@ -35,7 +39,11 @@ impl Drm1000App {
             snapshot,
             selected_port: String::new(),
             frequency: "1000000".to_owned(),
+            frequency_dirty: false,
+            frequency_generation: 0,
             volume: 50,
+            volume_generation: 0,
+            notice: None,
             register_address: "00".to_owned(),
             register_value: "00".to_owned(),
             register_write_armed: false,
@@ -57,11 +65,28 @@ impl Drm1000App {
         match parse_frequency(&self.frequency) {
             Ok(hz) => {
                 self.frequency = hz.to_string();
+                self.frequency_dirty = false;
+                self.frequency_generation = self.snapshot.frequency_generation;
+                self.notice = None;
                 self.send(Request::word(opcode::TUNE_TO_FREQUENCY, hz));
                 self.send(Request::new(opcode::GET_TUNED_FREQ));
             }
-            Err(error) => self.snapshot.last_error = Some(error),
+            Err(error) => self.notice = Some(error),
         }
+    }
+
+    fn start_test_tone(&mut self) {
+        let frequency_hz = self.snapshot.frequency_hz.unwrap_or_default();
+        if frequency_hz >= 30_000_000 {
+            self.notice =
+                Some("The DRM1000 test tone requires AM mode. Tune below 30 MHz first.".to_owned());
+            return;
+        }
+        if !matches!(self.snapshot.mode, Some(Mode::AmWide | Mode::AmNarrow)) {
+            self.set_mode(Mode::AmWide);
+        }
+        self.send(Request::byte(opcode::AUDIO_TEST_TONE, 1));
+        self.notice = Some("AM audio test tone enabled".to_owned());
     }
 
     fn parse_hex_byte(value: &str, field: &str) -> Result<u8, String> {
@@ -72,12 +97,25 @@ impl Drm1000App {
 
 impl eframe::App for Drm1000App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let frequency_input_id = egui::Id::new("frequency_input");
+        let frequency_has_focus = ctx.memory(|memory| memory.has_focus(frequency_input_id));
         if let Some(snapshot) = self.serial.try_snapshot() {
-            if let Some(frequency) = snapshot.frequency_hz {
-                self.frequency = frequency.to_string();
+            if should_apply_readback(
+                self.frequency_generation,
+                snapshot.frequency_generation,
+                self.frequency_dirty,
+                frequency_has_focus,
+            ) {
+                if let Some(frequency) = snapshot.frequency_hz {
+                    self.frequency = frequency.to_string();
+                }
+                self.frequency_generation = snapshot.frequency_generation;
             }
-            if let Some(volume) = snapshot.volume {
-                self.volume = volume;
+            if snapshot.volume_generation != self.volume_generation {
+                if let Some(volume) = snapshot.volume {
+                    self.volume = volume;
+                }
+                self.volume_generation = snapshot.volume_generation;
             }
             if self.selected_port.is_empty() {
                 if let Some(port) = snapshot.ports.iter().find(|port| port.likely_device) {
@@ -214,6 +252,10 @@ impl eframe::App for Drm1000App {
                     ui.add_space(12.0);
                     ui.colored_label(Color32::from_rgb(242, 118, 109), error);
                 }
+                if let Some(notice) = &self.notice {
+                    ui.add_space(8.0);
+                    ui.colored_label(Color32::from_rgb(238, 186, 72), notice);
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -222,8 +264,13 @@ impl eframe::App for Drm1000App {
             ui.horizontal(|ui| {
                 let response = ui.add_sized(
                     [250.0, 34.0],
-                    egui::TextEdit::singleline(&mut self.frequency).hint_text("Frequency in Hz"),
+                    egui::TextEdit::singleline(&mut self.frequency)
+                        .id(frequency_input_id)
+                        .hint_text("Frequency in Hz"),
                 );
+                if response.changed() {
+                    self.frequency_dirty = true;
+                }
                 if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
                     self.tune();
                 }
@@ -264,13 +311,22 @@ impl eframe::App for Drm1000App {
                 }
                 if ui.button("Start full scan").clicked() {
                     self.send(Request::word(opcode::START_SCAN, 0));
-                    self.send(Request::new(opcode::GET_SCANNER_PROGRESS));
+                    self.notice = None;
                 }
                 if ui.button("Load results").clicked() {
                     self.send(Request::new(opcode::GET_SCANNED_STATIONS));
                 }
             });
-            if let Some(progress) = self.snapshot.scanner_progress {
+            if self.snapshot.scan_active {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    if let Some(progress) = self.snapshot.scanner_progress {
+                        ui.label(format!("Scanning... {progress}%"));
+                    } else {
+                        ui.label("Scanning...");
+                    }
+                });
+            } else if let Some(progress) = self.snapshot.scanner_progress {
                 ui.add(
                     egui::ProgressBar::new(f32::from(progress) / 100.0)
                         .text(format!("Scan {progress}%")),
@@ -315,21 +371,22 @@ impl eframe::App for Drm1000App {
             ui.heading("Audio");
             ui.horizontal(|ui| {
                 ui.label("Volume");
-                if ui
-                    .add(egui::Slider::new(&mut self.volume, 0..=100).show_value(true))
-                    .changed()
-                {
+                let volume_response =
+                    ui.add(egui::Slider::new(&mut self.volume, 0..=100).show_value(true));
+                if volume_response.changed() {
                     self.send(Request::byte(opcode::SET_VOLUME, self.volume));
+                    self.send(Request::new(opcode::GET_VOLUME));
                 }
                 if ui
                     .button("Test tone")
                     .on_hover_text("Toggle the AM-mode audio test tone")
                     .clicked()
                 {
-                    self.send(Request::byte(opcode::AUDIO_TEST_TONE, 1));
+                    self.start_test_tone();
                 }
                 if ui.button("Stop tone").clicked() {
                     self.send(Request::byte(opcode::AUDIO_TEST_TONE, 0));
+                    self.notice = Some("Audio test tone disabled".to_owned());
                 }
             });
             ui.add_space(16.0);
@@ -396,6 +453,11 @@ impl eframe::App for Drm1000App {
             }
         });
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.serial.disconnect();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 fn configure_style(ctx: &egui::Context) {
@@ -420,6 +482,15 @@ fn status_row(ui: &mut egui::Ui, name: &str, value: &str) {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "Yes" } else { "No" }
+}
+
+fn should_apply_readback(
+    current_generation: u64,
+    incoming_generation: u64,
+    dirty: bool,
+    focused: bool,
+) -> bool {
+    incoming_generation != current_generation && !dirty && !focused
 }
 
 fn format_frequency(hz: u32) -> String {
@@ -461,5 +532,12 @@ mod tests {
         assert_eq!(parse_frequency("15.2 MHz").unwrap(), 15_200_000);
         assert_eq!(parse_frequency("999 kHz").unwrap(), 999_000);
         assert_eq!(parse_frequency("1000000").unwrap(), 1_000_000);
+    }
+
+    #[test]
+    fn edited_frequency_is_not_replaced_by_readback() {
+        assert!(!should_apply_readback(1, 2, true, false));
+        assert!(!should_apply_readback(1, 2, false, true));
+        assert!(should_apply_readback(1, 2, false, false));
     }
 }

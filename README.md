@@ -19,6 +19,12 @@ interface and command-line subcommands.
 - Serial-port discovery and firmware-version probing
 - Native Linux, Windows, and macOS support through `eframe` and `tokio-serial`
 
+Firmware `v0.17` does not implement the newer scanner-percentage command. The
+GUI therefore shows an indeterminate scan indicator and polls demodulator mode
+and station results as a compatibility fallback. Newer firmware also displays
+the reported percentage. A completed scan with no stations also closes the
+scan state instead of leaving the indicator active.
+
 ## Hardware Connection
 
 The DRM1000 does not provide USB itself. A USB-to-UART serial converter is
@@ -54,6 +60,16 @@ The GUI deliberately does not automatically connect to an arbitrary serial
 port. Select the adapter and press **Connect**. A device description containing
 `DRM` or `DE9180` is preselected when available.
 
+The application disables any status stream left active by an earlier session
+before initializing the UART. On a clean GUI disconnect or exit it also
+disables status and text output, preventing asynchronous data from confusing a
+later connection.
+
+Frequency readback updates the editor only while it is untouched. Once typing
+begins, the draft remains stable until **Tune** is submitted. Volume readback
+is similarly tied only to volume responses; note that firmware rounds the
+requested 0-100 value to its nearest internally supported step.
+
 ## Run
 
 ```bash
@@ -84,6 +100,10 @@ drm1000-gui --port /dev/ttyUSB0 status
 drm1000-gui --port /dev/ttyUSB0 register-read 3d
 drm1000-gui --port /dev/ttyUSB0 register-write 3d 55 --confirm
 ```
+
+The audio test tone is provided by the module only in AM mode. In the GUI,
+starting the tone at an MF/HF frequency automatically selects AM wide. At VHF,
+first tune below 30 MHz; the module selects FM rather than AM in the VHF band.
 
 Use `drm1000-gui --help` and each subcommand's `--help` for the complete set.
 
@@ -123,7 +143,8 @@ cargo check --target x86_64-pc-windows-gnu
 ```
 
 Protocol tests cover fragmented/noisy response framing, status fields,
-human-readable frequencies, and indexed scan-result labels.
+human-readable frequencies, indexed scan-result labels, editor readback
+generations, and legacy scan completion.
 
 For smoke tests without hardware, run `scripts/drm1000_simulator.py`; it prints
 the pseudo-terminal path to pass through `--port`. The simulator covers session

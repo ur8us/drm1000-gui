@@ -25,8 +25,11 @@ pub struct SerialSnapshot {
     pub connected_port: Option<String>,
     pub firmware_version: Option<String>,
     pub frequency_hz: Option<u32>,
+    pub frequency_generation: u64,
     pub mode: Option<Mode>,
     pub volume: Option<u8>,
+    pub volume_generation: u64,
+    pub scan_active: bool,
     pub scanner_progress: Option<u8>,
     pub stations: Vec<ScannedStation>,
     pub status: Option<ReceiverStatus>,
@@ -45,8 +48,11 @@ impl Default for SerialSnapshot {
             connected_port: None,
             firmware_version: None,
             frequency_hz: None,
+            frequency_generation: 0,
             mode: None,
             volume: None,
+            volume_generation: 0,
+            scan_active: false,
             scanner_progress: None,
             stations: Vec::new(),
             status: None,
@@ -134,7 +140,16 @@ async fn controller_task(
             }
             result = connection.as_mut().unwrap().next_frame() => {
                 match result {
-                    Ok(frame) => process_frame(frame, &mut snapshot),
+                    Ok(frame) => {
+                        let scan_completed = process_frame(frame, &mut snapshot);
+                        if scan_completed
+                            && let Some(device) = &mut connection
+                        {
+                            let _ = device.send(&Request::new(opcode::GET_SCANNED_STATIONS)).await;
+                            let _ = device.send(&Request::new(opcode::GET_TUNED_FREQ)).await;
+                            let _ = device.send(&Request::new(opcode::GET_DEMOD_MODE)).await;
+                        }
+                    }
                     Err(error) => {
                         snapshot.connection_status = "error".to_owned();
                         snapshot.connected_port = None;
@@ -144,9 +159,11 @@ async fn controller_task(
                 }
                 publish(&snapshot_tx, &repaint, &mut snapshot);
             }
-            _ = scan_poll.tick(), if snapshot.scanner_progress.is_some_and(|progress| progress < 100) => {
+            _ = scan_poll.tick(), if snapshot.scan_active => {
                 if let Some(device) = &mut connection {
                     let _ = device.send(&Request::new(opcode::GET_SCANNER_PROGRESS)).await;
+                    let _ = device.send(&Request::new(opcode::GET_DEMOD_MODE)).await;
+                    let _ = device.send(&Request::new(opcode::GET_SCANNED_STATIONS)).await;
                 }
             }
         }
@@ -161,6 +178,10 @@ async fn handle_command(
     match command {
         ControllerCommand::RefreshPorts => refresh_ports(snapshot),
         ControllerCommand::Disconnect => {
+            if let Some(device) = connection {
+                let _ = device.send(&Request::byte(opcode::STATUS_OUTPUT, 0)).await;
+                let _ = device.send(&Request::byte(opcode::TEXT_MSG_OUT, 0)).await;
+            }
             *connection = None;
             snapshot.connected_port = None;
             snapshot.connection_status = "disconnected".to_owned();
@@ -202,12 +223,18 @@ async fn handle_command(
                     snapshot.last_register = Some((*address, 0));
                 }
                 if opcode == opcode::START_SCAN {
-                    snapshot.scanner_progress = Some(0);
+                    snapshot.scan_active = true;
+                    snapshot.scanner_progress = None;
                     snapshot.stations.clear();
                 }
                 match device.send(&request).await {
                     Ok(()) => push_log(snapshot, format!("> opcode 0x{opcode:02X}")),
-                    Err(error) => snapshot.last_error = Some(error.to_string()),
+                    Err(error) => {
+                        if opcode == opcode::START_SCAN {
+                            snapshot.scan_active = false;
+                        }
+                        snapshot.last_error = Some(error.to_string());
+                    }
                 }
             } else {
                 snapshot.last_error = Some("not connected".to_owned());
@@ -227,7 +254,7 @@ fn initial_requests() -> Vec<Request> {
     ]
 }
 
-fn process_frame(frame: Frame, snapshot: &mut SerialSnapshot) {
+fn process_frame(frame: Frame, snapshot: &mut SerialSnapshot) -> bool {
     push_log(
         snapshot,
         format!(
@@ -237,13 +264,28 @@ fn process_frame(frame: Frame, snapshot: &mut SerialSnapshot) {
         ),
     );
     if frame.error != 0 {
+        if snapshot.scan_active && frame.opcode == opcode::GET_SCANNED_STATIONS {
+            if frame.error == 13 {
+                return false;
+            }
+            if frame.error == 4 {
+                snapshot.scan_active = false;
+                snapshot.scanner_progress = Some(100);
+                snapshot.stations.clear();
+                return true;
+            }
+        }
+        if frame.opcode == opcode::START_SCAN {
+            snapshot.scan_active = false;
+        }
         snapshot.last_error = Some(format!(
             "0x{:02X}: {}",
             frame.error,
             protocol::error_description(frame.error)
         ));
-        return;
+        return false;
     }
+    let mut scan_completed = false;
     let result: Result<(), String> = (|| {
         match frame.opcode {
             opcode::GET_VERSION => {
@@ -254,7 +296,8 @@ fn process_frame(frame: Frame, snapshot: &mut SerialSnapshot) {
                 )
             }
             opcode::GET_TUNED_FREQ => {
-                snapshot.frequency_hz = Some(protocol::le_u32(&frame.payload, 0)?)
+                snapshot.frequency_hz = Some(protocol::le_u32(&frame.payload, 0)?);
+                snapshot.frequency_generation += 1;
             }
             opcode::GET_DEMOD_MODE => {
                 snapshot.mode = frame
@@ -262,7 +305,10 @@ fn process_frame(frame: Frame, snapshot: &mut SerialSnapshot) {
                     .first()
                     .and_then(|value| Mode::from_status(*value))
             }
-            opcode::GET_VOLUME => snapshot.volume = frame.payload.first().copied(),
+            opcode::GET_VOLUME => {
+                snapshot.volume = frame.payload.first().copied();
+                snapshot.volume_generation += 1;
+            }
             opcode::RSSI_GET => {
                 snapshot
                     .status
@@ -270,10 +316,19 @@ fn process_frame(frame: Frame, snapshot: &mut SerialSnapshot) {
                     .rssi_dbm = f32::from_bits(protocol::le_u32(&frame.payload, 0)?)
             }
             opcode::GET_SCANNER_PROGRESS => {
-                snapshot.scanner_progress = frame.payload.first().copied()
+                snapshot.scanner_progress = frame.payload.first().copied();
+                if snapshot.scanner_progress == Some(100) {
+                    snapshot.scan_active = false;
+                    scan_completed = true;
+                }
             }
             opcode::GET_SCANNED_STATIONS => {
-                snapshot.stations = protocol::parse_scanned_stations(&frame)?
+                snapshot.stations = protocol::parse_scanned_stations(&frame)?;
+                if snapshot.scan_active {
+                    snapshot.scan_active = false;
+                    snapshot.scanner_progress = Some(100);
+                    scan_completed = true;
+                }
             }
             opcode::GET_STATUS => {
                 let status = protocol::parse_status(&frame)?;
@@ -295,9 +350,8 @@ fn process_frame(frame: Frame, snapshot: &mut SerialSnapshot) {
     })();
     if let Err(error) = result {
         snapshot.last_error = Some(error);
-    } else {
-        snapshot.last_error = None;
     }
+    scan_completed
 }
 
 fn refresh_ports(snapshot: &mut SerialSnapshot) {
@@ -344,4 +398,72 @@ fn publish(
     snapshot.generation += 1;
     let _ = tx.send(snapshot.clone());
     repaint.request_repaint_after(Duration::from_millis(50));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unrelated_frames_do_not_refresh_frequency_or_volume_editors() {
+        let mut snapshot = SerialSnapshot::default();
+        process_frame(
+            Frame {
+                opcode: opcode::GET_VERSION,
+                error: 0,
+                payload: b"test".to_vec(),
+            },
+            &mut snapshot,
+        );
+        assert_eq!(snapshot.frequency_generation, 0);
+        assert_eq!(snapshot.volume_generation, 0);
+
+        process_frame(
+            Frame {
+                opcode: opcode::GET_VOLUME,
+                error: 0,
+                payload: vec![42],
+            },
+            &mut snapshot,
+        );
+        assert_eq!(snapshot.volume, Some(42));
+        assert_eq!(snapshot.volume_generation, 1);
+    }
+
+    #[test]
+    fn station_results_finish_legacy_scan() {
+        let mut snapshot = SerialSnapshot {
+            scan_active: true,
+            ..Default::default()
+        };
+        let completed = process_frame(
+            Frame {
+                opcode: opcode::GET_SCANNED_STATIONS,
+                error: 0,
+                payload: 0u32.to_le_bytes().to_vec(),
+            },
+            &mut snapshot,
+        );
+        assert!(completed);
+        assert!(!snapshot.scan_active);
+        assert_eq!(snapshot.scanner_progress, Some(100));
+    }
+
+    #[test]
+    fn no_stations_error_finishes_legacy_scan() {
+        let mut snapshot = SerialSnapshot {
+            scan_active: true,
+            ..Default::default()
+        };
+        let completed = process_frame(
+            Frame {
+                opcode: opcode::GET_SCANNED_STATIONS,
+                error: 4,
+                payload: Vec::new(),
+            },
+            &mut snapshot,
+        );
+        assert!(completed);
+        assert!(!snapshot.scan_active);
+    }
 }
