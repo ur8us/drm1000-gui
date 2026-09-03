@@ -32,9 +32,17 @@ broadcast receiver module. It targets Linux, Windows, and macOS.
   DE9180 user manual in ignored `assets/` as the protocol references.
 - Keep the serial default at 921,600 baud, 8-N-1. The DRM1000 UART uses 3.1 V
   logic and must not be described as electrically compatible with RS-232.
+- Keep host wiring accurate: adapter RXD to DRM1000 pin 32 (`UART_TX`), adapter
+  TXD to pin 33 (`UART_RX`), and adapter GND to a module ground such as pin 30.
+- Do not suggest powering the bare module from an arbitrary USB-UART adapter.
+  The main receiver uses a separate nominal 3.1 V supply on pin 7. The host
+  must not drive pin 33 before the module supply is stable.
 - Preserve the guarded register-write UX: GUI checkbox and CLI `--confirm`.
 - Do not add firmware flashing without an authenticated vendor image and the
   matching documented update process.
+- The hardware probe on 2026-09-03 reported firmware
+  `CCDRM-drm1000-prod-v0.17-20240515161312` through `/dev/ttyACM0`. Treat this
+  as observed device state, not as the current vendor release version.
 - Update this file and `README.md` whenever source behavior, architecture, or
   developer workflow changes.
 

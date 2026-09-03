@@ -21,9 +21,34 @@ interface and command-line subcommands.
 
 ## Hardware Connection
 
-The module UART uses `921600` baud, 8-N-1 and 3.1 V logic. It is not an RS-232
-electrical interface. Use a compatible USB UART adapter, power the DRM1000
-first, and do not drive its RX pin before module power is present.
+The DRM1000 does not provide USB itself. A USB-to-UART serial converter is
+required. The converter must support `921600` baud, 8 data bits, no parity, and
+1 stop bit (`8-N-1`). It must also be electrically compatible with the
+DRM1000's 3.1 V CMOS UART. Do not use RS-232 voltage levels or a 5 V TTL UART.
+If the converter TX voltage is not specified as compatible with 3.1 V logic,
+use an appropriate level shifter.
+
+Connect the converter and module with crossed transmit/receive signals:
+
+| USB-to-UART converter | DRM1000 module | Direction |
+| --- | --- | --- |
+| RXD | Pin 32, `UART_TX` | DRM1000 to computer |
+| TXD | Pin 33, `UART_RX` | Computer to DRM1000 |
+| GND | Pin 30, `GND` | Common reference |
+
+Any DRM1000 GND pin may be used, but pin 30 is adjacent to the UART pins. Do
+not connect the converter's 5 V or 3.3 V supply output to the UART pins. A bare
+DRM1000 module needs a separate nominal 3.1 V supply on pin 7 (`VDD_3V1`) and
+ground; the DE9180 board supplies the module through its own power input. Pin
+41 (`VDD_PA`) is a separate speaker-amplifier supply connection and is not
+needed for UART communication.
+
+Power the DRM1000 and allow its supply to stabilize before the converter drives
+pin 33. The datasheet warns that driving `UART_RX` before module power is
+present can damage the module or cause inconsistent behavior. An adapter or
+level shifter with output enable can enforce this sequence. Pin 31,
+`1V8_MONITOR`, indicates that the internal rail is active, but must not be used
+as a power source.
 
 The GUI deliberately does not automatically connect to an arbitrary serial
 port. Select the adapter and press **Connect**. A device description containing
@@ -41,6 +66,11 @@ List ports and probe a receiver:
 cargo run -- ports
 cargo run -- --port /dev/ttyUSB0 probe
 ```
+
+On Windows, replace `/dev/ttyUSB0` with a port such as `COM3`. On macOS, use
+the corresponding `/dev/cu.*` device. The `probe` command performs the
+documented `UART_INIT` handshake and then reads firmware version, frequency,
+mode, and volume without changing receiver configuration.
 
 Representative CLI operations:
 
@@ -110,10 +140,24 @@ UM9180/1.0 are downloaded to the gitignored `assets/` directory. Derived protoco
 instructions are not public downloads; CML distributes protected support
 material through its customer portal. This application will not attempt an
 unverified flash. Compare a connected module's reported version with the
-firmware supplied for that exact hardware revision by CML Micro. During initial
-development, the only detected adapter (`/dev/ttyACM0`, a Raspberry Pi Debug
-Probe UART) did not answer the documented `UART_INIT` request at 921,600 baud,
-so no hardware version or update could be verified.
+firmware supplied for that exact hardware revision by CML Micro.
+
+Hardware probe recorded on 2026-09-03 through `/dev/ttyACM0`:
+
+```text
+Firmware: CCDRM-drm1000-prod-v0.17-20240515161312
+Frequency: 87500000 Hz
+Mode: DRM
+Volume: 56
+```
+
+The `v0.17` build date predates firmware-related additions recorded in the
+July and December 2024 DRM1000 datasheet history, so it is probably not the
+latest production firmware. No authenticated DRM1000 firmware image or update
+procedure was found in public CML downloads or locally on the development
+machine. Obtain the current package for the exact module revision from the
+[CML customer portal](https://portal.cmlmicro.com/) or CML support before
+attempting an update.
 
 ## License
 
