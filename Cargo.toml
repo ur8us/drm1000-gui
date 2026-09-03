@@ -1,0 +1,19 @@
+[package]
+name = "drm1000_gui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Cross-platform GUI and CLI controller for the CML Micro DRM1000"
+repository = "https://github.com/ur8us/drm1000-gui"
+
+[[bin]]
+name = "drm1000-gui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+eframe = { version = "0.33.3", features = ["wgpu"] }
+egui = "0.33.3"
+tokio = { version = "1.50.0", features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
+tokio-serial = "5.4.5"

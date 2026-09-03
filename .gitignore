@@ -1,0 +1,4 @@
+/target/
+/assets/
+*.log
+.DS_Store
