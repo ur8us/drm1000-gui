@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use drm1000_gui::device::DeviceConnection;
-use drm1000_gui::protocol::{self, Frame, Mode, Request, opcode};
+use drm1000_gui::protocol::{self, Frame, Mode, PersistentConfig, Request, opcode};
 use tokio_serial::{SerialPortType, available_ports};
 
 #[derive(Parser)]
@@ -60,6 +60,18 @@ enum Command {
     Volume {
         value: Option<u8>,
     },
+    Gain {
+        mode: Option<GainMode>,
+        #[arg(allow_hyphen_values = true)]
+        value: Option<i8>,
+        #[arg(long, help = "Confirm the persistent flash write")]
+        confirm: bool,
+        #[arg(
+            long,
+            help = "Use documented DRM1000/2.2 defaults when no stored config can be read"
+        )]
+        initialize_defaults: bool,
+    },
     PresetRecall {
         slot: u8,
     },
@@ -99,6 +111,31 @@ enum CliMode {
 enum OnOff {
     On,
     Off,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum GainMode {
+    Drm,
+    Am,
+    Fm,
+}
+
+impl GainMode {
+    fn index(self) -> usize {
+        match self {
+            Self::Drm => 0,
+            Self::Am => 1,
+            Self::Fm => 2,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Drm => "DRM",
+            Self::Am => "AM",
+            Self::Fm => "FM",
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -319,6 +356,59 @@ async fn run_cli(args: Args) -> Result<()> {
             } else {
                 let frame = request(&mut device, Request::new(opcode::GET_VOLUME), timeout).await?;
                 println!("{}", one_byte(&frame)?);
+            }
+        }
+        Command::Gain {
+            mode,
+            value,
+            confirm,
+            initialize_defaults,
+        } => {
+            let frame = device
+                .transact(
+                    &Request::new(opcode::PERSISTENT_DEVICE_CONFIG_READ),
+                    timeout,
+                )
+                .await?;
+            let no_stored_config = frame.error == 11;
+            let mut config = if no_stored_config {
+                if mode.is_some() && !initialize_defaults {
+                    bail!(
+                        "the module has no readable persistent configuration; repeat with --initialize-defaults to write the documented DRM1000/2.2 defaults"
+                    );
+                }
+                PersistentConfig::vendor_defaults()
+            } else {
+                PersistentConfig::from_frame(&frame).map_err(anyhow::Error::msg)?
+            };
+            match (mode, value) {
+                (None, None) => {
+                    let gains = config.audio_gains_db();
+                    if no_stored_config {
+                        println!("No stored configuration; showing built-in defaults.");
+                    }
+                    println!(
+                        "DRM: {} dB\nAM: {} dB\nFM: {} dB",
+                        gains[0], gains[1], gains[2]
+                    );
+                }
+                (Some(mode), Some(value)) => {
+                    if !confirm {
+                        bail!("gain changes write persistent flash and require --confirm");
+                    }
+                    let mut gains = config.audio_gains_db();
+                    gains[mode.index()] = value;
+                    config
+                        .set_audio_gains_db(gains)
+                        .map_err(anyhow::Error::msg)?;
+                    request(&mut device, config.write_request(), timeout).await?;
+                    println!(
+                        "{} audio gain saved as {} dB; restart the DRM1000 to apply it",
+                        mode.label(),
+                        value
+                    );
+                }
+                _ => bail!("gain requires both MODE and VALUE, or neither when reading"),
             }
         }
         Command::PresetRecall { slot } | Command::PresetStore { slot } => {

@@ -7,9 +7,12 @@ use tokio::sync::{mpsc, watch};
 use tokio_serial::{SerialPortType, available_ports};
 
 use crate::device::DeviceConnection;
-use crate::protocol::{self, Frame, Mode, ReceiverStatus, Request, ScannedStation, opcode};
+use crate::protocol::{
+    self, Frame, Mode, PersistentConfig, ReceiverStatus, Request, ScannedStation, opcode,
+};
 
 const MAX_LOG_LINES: usize = 160;
+const CONFIG_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Default)]
 pub struct PortSummary {
@@ -29,6 +32,9 @@ pub struct SerialSnapshot {
     pub mode: Option<Mode>,
     pub volume: Option<u8>,
     pub volume_generation: u64,
+    pub audio_gains_db: Option<[i8; 3]>,
+    pub audio_gain_generation: u64,
+    pub persistent_config_invalid: bool,
     pub scan_active: bool,
     pub scanner_progress: Option<u8>,
     pub stations: Vec<ScannedStation>,
@@ -52,6 +58,9 @@ impl Default for SerialSnapshot {
             mode: None,
             volume: None,
             volume_generation: 0,
+            audio_gains_db: None,
+            audio_gain_generation: 0,
+            persistent_config_invalid: false,
             scan_active: false,
             scanner_progress: None,
             stations: Vec::new(),
@@ -103,6 +112,11 @@ impl SerialController {
     pub fn send(&self, request: Request) {
         let _ = self.command_tx.send(ControllerCommand::Send(request));
     }
+    pub fn set_audio_gains(&self, gains: [i8; 3], initialize_defaults: bool) {
+        let _ = self
+            .command_tx
+            .send(ControllerCommand::SetAudioGains(gains, initialize_defaults));
+    }
 }
 
 enum ControllerCommand {
@@ -110,6 +124,7 @@ enum ControllerCommand {
     Connect(String),
     Disconnect,
     Send(Request),
+    SetAudioGains([i8; 3], bool),
 }
 
 async fn controller_task(
@@ -185,10 +200,14 @@ async fn handle_command(
             *connection = None;
             snapshot.connected_port = None;
             snapshot.connection_status = "disconnected".to_owned();
+            snapshot.audio_gains_db = None;
+            snapshot.persistent_config_invalid = false;
             push_log(snapshot, "disconnected".to_owned());
         }
         ControllerCommand::Connect(port) => {
             snapshot.connection_status = "connecting".to_owned();
+            snapshot.audio_gains_db = None;
+            snapshot.persistent_config_invalid = false;
             match DeviceConnection::open(&port, protocol::BAUD_RATE).await {
                 Ok(mut device) => {
                     if let Err(error) = device.initialise(Duration::from_secs(3)).await {
@@ -240,7 +259,54 @@ async fn handle_command(
                 snapshot.last_error = Some("not connected".to_owned());
             }
         }
+        ControllerCommand::SetAudioGains(gains, initialize_defaults) => {
+            let Some(device) = connection else {
+                snapshot.last_error = Some("not connected".to_owned());
+                return;
+            };
+            match update_audio_gains(device, gains, initialize_defaults).await {
+                Ok(()) => {
+                    snapshot.audio_gains_db = Some(gains);
+                    snapshot.audio_gain_generation += 1;
+                    snapshot.persistent_config_invalid = false;
+                    snapshot.last_error = None;
+                    push_log(
+                        snapshot,
+                        format!(
+                            "saved audio gains: DRM {} dB, AM {} dB, FM {} dB",
+                            gains[0], gains[1], gains[2]
+                        ),
+                    );
+                }
+                Err(error) => snapshot.last_error = Some(error),
+            }
+        }
     }
+}
+
+async fn update_audio_gains(
+    device: &mut DeviceConnection,
+    gains: [i8; 3],
+    initialize_defaults: bool,
+) -> Result<(), String> {
+    let frame = device
+        .transact(
+            &Request::new(opcode::PERSISTENT_DEVICE_CONFIG_READ),
+            CONFIG_WRITE_TIMEOUT,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut config = if frame.error == 11 && initialize_defaults {
+        PersistentConfig::vendor_defaults()
+    } else {
+        PersistentConfig::from_frame(&frame)?
+    };
+    config.set_audio_gains_db(gains)?;
+    let frame = device
+        .transact(&config.write_request(), CONFIG_WRITE_TIMEOUT)
+        .await
+        .map_err(|error| error.to_string())?;
+    frame.require_ok()
 }
 
 fn initial_requests() -> Vec<Request> {
@@ -249,6 +315,7 @@ fn initial_requests() -> Vec<Request> {
         Request::new(opcode::GET_TUNED_FREQ),
         Request::new(opcode::GET_DEMOD_MODE),
         Request::new(opcode::GET_VOLUME),
+        Request::new(opcode::PERSISTENT_DEVICE_CONFIG_READ),
         Request::byte(opcode::TEXT_MSG_OUT, 1),
         Request::byte(opcode::STATUS_OUTPUT, 1),
     ]
@@ -264,6 +331,11 @@ fn process_frame(frame: Frame, snapshot: &mut SerialSnapshot) -> bool {
         ),
     );
     if frame.error != 0 {
+        if frame.opcode == opcode::PERSISTENT_DEVICE_CONFIG_READ && frame.error == 11 {
+            snapshot.audio_gains_db = None;
+            snapshot.persistent_config_invalid = true;
+            return false;
+        }
         if snapshot.scan_active && frame.opcode == opcode::GET_SCANNED_STATIONS {
             if frame.error == 13 {
                 return false;
@@ -308,6 +380,12 @@ fn process_frame(frame: Frame, snapshot: &mut SerialSnapshot) -> bool {
             opcode::GET_VOLUME => {
                 snapshot.volume = frame.payload.first().copied();
                 snapshot.volume_generation += 1;
+            }
+            opcode::PERSISTENT_DEVICE_CONFIG_READ => {
+                let config = PersistentConfig::from_frame(&frame)?;
+                snapshot.audio_gains_db = Some(config.audio_gains_db());
+                snapshot.audio_gain_generation += 1;
+                snapshot.persistent_config_invalid = false;
             }
             opcode::RSSI_GET => {
                 snapshot
@@ -428,6 +506,44 @@ mod tests {
         );
         assert_eq!(snapshot.volume, Some(42));
         assert_eq!(snapshot.volume_generation, 1);
+        assert_eq!(snapshot.audio_gain_generation, 0);
+    }
+
+    #[test]
+    fn persistent_config_refreshes_only_audio_gain_editors() {
+        let mut snapshot = SerialSnapshot::default();
+        let mut payload = vec![0; protocol::PERSISTENT_CONFIG_LEN];
+        payload[35..38].copy_from_slice(&[0xfb, 3, 12]);
+        process_frame(
+            Frame {
+                opcode: opcode::PERSISTENT_DEVICE_CONFIG_READ,
+                error: 0,
+                payload,
+            },
+            &mut snapshot,
+        );
+
+        assert_eq!(snapshot.audio_gains_db, Some([-5, 3, 12]));
+        assert_eq!(snapshot.audio_gain_generation, 1);
+        assert_eq!(snapshot.frequency_generation, 0);
+        assert_eq!(snapshot.volume_generation, 0);
+    }
+
+    #[test]
+    fn missing_persistent_config_is_an_explicit_state() {
+        let mut snapshot = SerialSnapshot::default();
+        process_frame(
+            Frame {
+                opcode: opcode::PERSISTENT_DEVICE_CONFIG_READ,
+                error: 11,
+                payload: Vec::new(),
+            },
+            &mut snapshot,
+        );
+
+        assert!(snapshot.persistent_config_invalid);
+        assert_eq!(snapshot.audio_gains_db, None);
+        assert_eq!(snapshot.last_error, None);
     }
 
     #[test]

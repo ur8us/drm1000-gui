@@ -24,6 +24,8 @@ def main():
     frequency = 1_000_000
     mode = 0
     volume = 50
+    persistent_config = bytearray(255)
+    persistent_config_valid = os.environ.get("DRM1000_SIM_NO_CONFIG") != "1"
     buffer = bytearray()
 
     while True:
@@ -36,6 +38,7 @@ def main():
             parameters = bytes(buffer[1:1 + parameter_length])
             del buffer[:1 + parameter_length]
             payload = b""
+            response_error = 0
             if opcode == 0x04:
                 frequency = struct.unpack("<I", parameters)[0]
             elif opcode == 0x05:
@@ -62,7 +65,15 @@ def main():
                 payload = struct.pack("<f", -71.5)
             elif opcode == 0x27:
                 payload = bytes((100,))
-            os.write(master, frame(opcode, payload))
+            elif opcode == 0x50:
+                if persistent_config_valid:
+                    payload = bytes(persistent_config)
+                else:
+                    response_error = 11
+            elif opcode == 0x51:
+                persistent_config[:] = parameters
+                persistent_config_valid = True
+            os.write(master, frame(opcode, payload, response_error))
             if opcode == 0x0F and parameters == b"\x01":
                 status = bytearray(409)
                 status[0] = mode

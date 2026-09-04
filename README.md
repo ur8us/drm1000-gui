@@ -16,7 +16,7 @@ interface and command-line subcommands.
 - Frequency entry in Hz, kHz, or MHz and direct tuning
 - DRM, AM wide, AM narrow, and FM controls
 - Full-band scan, progress, result loading, service selection, and station up/down
-- Volume and AM audio test-tone controls
+- Volume, per-mode audio gain boost, and AM audio test-tone controls
 - Continuous RSSI, DRM synchronization, MER, frequency-offset, service, and text display
 - Four station preset recall/store slots from the CLI
 - Guarded CMX918 register reads and writes
@@ -74,6 +74,20 @@ begins, the draft remains stable until **Tune** is submitted. Volume readback
 is similarly tied only to volume responses; note that firmware rounds the
 requested 0-100 value to its nearest internally supported step.
 
+The **Audio gain boost** controls adjust DRM, AM, and FM output gain separately
+from `-20 dB` to `+20 dB`. These are persistent receiver settings, not RF gain:
+the DRM1000 manages RF/IF gain through its mode-specific AGC tables. Applying
+audio gain writes the module's full configuration to flash while preserving all
+other bytes, so the GUI requires **Enable persistent gain write** and the CLI
+requires `--confirm`. Restart the receiver before judging the new gain.
+
+Some modules, including the tested `v0.17` unit, report that no persistent
+configuration has ever been stored and instead run internal defaults. In that
+case the GUI also requires **Initialize all settings from DRM1000/2.2
+defaults**. The equivalent CLI option is `--initialize-defaults`. This writes
+the complete default tuning and AGC tables published in datasheet revision 2.2
+along with the selected gain; it is never performed automatically.
+
 ## Run
 
 ```bash
@@ -100,6 +114,9 @@ drm1000-gui --port /dev/ttyUSB0 mode drm
 drm1000-gui --port /dev/ttyUSB0 scan 0
 drm1000-gui --port /dev/ttyUSB0 stations
 drm1000-gui --port /dev/ttyUSB0 volume 65
+drm1000-gui --port /dev/ttyUSB0 gain
+drm1000-gui --port /dev/ttyUSB0 gain drm 6 --confirm
+drm1000-gui --port /dev/ttyUSB0 gain drm 6 --confirm --initialize-defaults
 drm1000-gui --port /dev/ttyUSB0 status
 drm1000-gui --port /dev/ttyUSB0 register-read 3d
 drm1000-gui --port /dev/ttyUSB0 register-write 3d 55 --confirm
@@ -153,7 +170,9 @@ generations, and legacy scan completion.
 For smoke tests without hardware, run `scripts/drm1000_simulator.py`; it prints
 the pseudo-terminal path to pass through `--port`. The simulator covers session
 initialization, probe, tuning, volume, status/RSSI, scan progress, and register
-read transactions.
+read transactions. It also retains persistent configuration writes for audio
+gain smoke tests. Set `DRM1000_SIM_NO_CONFIG=1` to emulate a module running
+built-in defaults with no valid stored configuration.
 
 The vendor datasheet revision 2.2 and the DE9180/DRM1000 user manual revision
 UM9180/1.0 are downloaded to the gitignored `assets/` directory. Derived protocol notes are tracked in

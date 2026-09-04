@@ -3,6 +3,11 @@ use std::fmt;
 pub const BAUD_RATE: u32 = 921_600;
 pub const HEADER_LEN: usize = 6;
 pub const MAX_FRAME_LEN: usize = 1_048_576;
+pub const PERSISTENT_CONFIG_LEN: usize = 255;
+pub const AUDIO_GAIN_MIN_DB: i8 = -20;
+pub const AUDIO_GAIN_MAX_DB: i8 = 20;
+
+const AUDIO_GAIN_OFFSET: usize = 35;
 
 pub mod opcode {
     pub const STANDBY: u8 = 0x00;
@@ -36,8 +41,110 @@ pub mod opcode {
     pub const SET_SCREEN_STATUS: u8 = 0x25;
     pub const GET_SCREEN_STATUS: u8 = 0x26;
     pub const GET_SCANNER_PROGRESS: u8 = 0x27;
+    pub const PERSISTENT_DEVICE_CONFIG_READ: u8 = 0x50;
+    pub const PERSISTENT_DEVICE_CONFIG_WRITE: u8 = 0x51;
     pub const AUDIO_TEST_TONE: u8 = 0x60;
     pub const UART_INIT: u8 = 0x7f;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersistentConfig {
+    bytes: [u8; PERSISTENT_CONFIG_LEN],
+}
+
+impl PersistentConfig {
+    pub fn vendor_defaults() -> Self {
+        let mut bytes = [0; PERSISTENT_CONFIG_LEN];
+        bytes[..17].fill(1);
+        bytes[18..20].copy_from_slice(&875u16.to_le_bytes());
+        bytes[20..22].copy_from_slice(&1080u16.to_le_bytes());
+        bytes[22] = 1;
+        bytes[24] = 1;
+        bytes[27] = 0x09;
+        bytes[28] = 0xe0;
+        bytes[29] = 3;
+        bytes[32] = 1;
+        bytes[33] = 15;
+        bytes[34] = 30;
+        bytes[38..45].copy_from_slice(b"DRM1000");
+
+        let mf_lut: [u16; 64] = [
+            3456, 3220, 3010, 2800, 2590, 2416, 2260, 2120, 2000, 1888, 1770, 1650, 1550, 1470,
+            1400, 1325, 1260, 1200, 1148, 1104, 1053, 1002, 960, 923, 880, 838, 795, 753, 720, 685,
+            655, 620, 585, 560, 538, 522, 498, 480, 458, 438, 418, 400, 386, 372, 358, 344, 330,
+            317, 305, 294, 283, 273, 262, 252, 242, 232, 220, 209, 199, 190, 180, 170, 160, 151,
+        ];
+        for (destination, value) in bytes[49..177].chunks_exact_mut(2).zip(mf_lut) {
+            destination.copy_from_slice(&value.to_le_bytes());
+        }
+
+        let agc_profiles: [[u8; 13]; 6] = [
+            [
+                0xaa, 0x3c, 0x82, 0x3c, 0xa0, 0x46, 0x00, 0x04, 0x0a, 0x0a, 0x0a, 0x80, 0x80,
+            ],
+            [
+                0xaa, 0x32, 0x82, 0x3c, 0xdc, 0x50, 0x00, 0x00, 0x08, 0x00, 0x00, 0xb0, 0xb0,
+            ],
+            [
+                0xaa, 0x3c, 0x82, 0x3c, 0x82, 0x46, 0x00, 0x04, 0x0a, 0x0a, 0x0a, 0x80, 0x80,
+            ],
+            [
+                0xaa, 0x3c, 0xc8, 0x6c, 0x9c, 0x50, 0x00, 0x00, 0x08, 0x00, 0x00, 0xb0, 0xb0,
+            ],
+            [
+                0xaa, 0x3c, 0x82, 0x3c, 0x82, 0x46, 0x00, 0x04, 0x1b, 0x1b, 0x1b, 0x80, 0x80,
+            ],
+            [
+                0xaa, 0x3c, 0x82, 0x3c, 0x82, 0x46, 0x00, 0x04, 0x13, 0x13, 0x13, 0x80, 0x80,
+            ],
+        ];
+        for (destination, profile) in bytes[177..].chunks_exact_mut(13).zip(agc_profiles) {
+            destination.copy_from_slice(&profile);
+        }
+        Self { bytes }
+    }
+
+    pub fn from_frame(frame: &Frame) -> Result<Self, String> {
+        frame.require_ok()?;
+        let bytes: [u8; PERSISTENT_CONFIG_LEN] =
+            frame.payload.as_slice().try_into().map_err(|_| {
+                format!(
+                    "persistent configuration is {} bytes, expected {PERSISTENT_CONFIG_LEN}",
+                    frame.payload.len()
+                )
+            })?;
+        Ok(Self { bytes })
+    }
+
+    pub fn audio_gains_db(&self) -> [i8; 3] {
+        [
+            self.bytes[AUDIO_GAIN_OFFSET] as i8,
+            self.bytes[AUDIO_GAIN_OFFSET + 1] as i8,
+            self.bytes[AUDIO_GAIN_OFFSET + 2] as i8,
+        ]
+    }
+
+    pub fn set_audio_gains_db(&mut self, gains: [i8; 3]) -> Result<(), String> {
+        if let Some(gain) = gains
+            .iter()
+            .find(|gain| !(AUDIO_GAIN_MIN_DB..=AUDIO_GAIN_MAX_DB).contains(gain))
+        {
+            return Err(format!(
+                "audio gain {gain} dB is outside the supported range {AUDIO_GAIN_MIN_DB} to {AUDIO_GAIN_MAX_DB} dB"
+            ));
+        }
+        for (destination, gain) in self.bytes[AUDIO_GAIN_OFFSET..AUDIO_GAIN_OFFSET + 3]
+            .iter_mut()
+            .zip(gains)
+        {
+            *destination = gain as u8;
+        }
+        Ok(())
+    }
+
+    pub fn write_request(&self) -> Request {
+        Request::bytes(opcode::PERSISTENT_DEVICE_CONFIG_WRITE, &self.bytes)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -441,5 +548,48 @@ mod tests {
         };
         let stations = parse_scanned_stations(&frame).unwrap();
         assert_eq!(stations[0].services[0].label, "Radio One");
+    }
+
+    #[test]
+    fn audio_gain_update_preserves_the_rest_of_persistent_config() {
+        let payload: Vec<u8> = (0..PERSISTENT_CONFIG_LEN)
+            .map(|index| index as u8)
+            .collect();
+        let frame = Frame {
+            opcode: opcode::PERSISTENT_DEVICE_CONFIG_READ,
+            error: 0,
+            payload: payload.clone(),
+        };
+        let mut config = PersistentConfig::from_frame(&frame).unwrap();
+        config.set_audio_gains_db([-20, 0, 20]).unwrap();
+        let request = config.write_request();
+
+        assert_eq!(config.audio_gains_db(), [-20, 0, 20]);
+        assert_eq!(request.parameters.len(), PERSISTENT_CONFIG_LEN);
+        assert_eq!(
+            &request.parameters[..AUDIO_GAIN_OFFSET],
+            &payload[..AUDIO_GAIN_OFFSET]
+        );
+        assert_eq!(
+            &request.parameters[AUDIO_GAIN_OFFSET + 3..],
+            &payload[AUDIO_GAIN_OFFSET + 3..]
+        );
+        assert!(config.set_audio_gains_db([-21, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn vendor_defaults_match_documented_layout() {
+        let config = PersistentConfig::vendor_defaults();
+        assert_eq!(config.audio_gains_db(), [0, 0, 0]);
+        assert_eq!(&config.bytes[..17], &[1; 17]);
+        assert_eq!(&config.bytes[18..22], &[0x6b, 0x03, 0x38, 0x04]);
+        assert_eq!(&config.bytes[38..49], b"DRM1000\0\0\0\0");
+        assert_eq!(&config.bytes[49..53], &[0x80, 0x0d, 0x94, 0x0c]);
+        assert_eq!(
+            &config.bytes[177..190],
+            &[
+                0xaa, 0x3c, 0x82, 0x3c, 0xa0, 0x46, 0x00, 0x04, 0x0a, 0x0a, 0x0a, 0x80, 0x80,
+            ]
+        );
     }
 }

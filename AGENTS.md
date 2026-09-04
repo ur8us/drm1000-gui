@@ -7,8 +7,8 @@ broadcast receiver module. It targets Linux, Windows, and macOS.
 
 ## Current Architecture
 
-- `src/protocol.rs` owns command encoding, framed-response decoding, status and
-  station parsing, and vendor error descriptions.
+- `src/protocol.rs` owns command encoding, framed-response decoding, status,
+  station and persistent-configuration parsing, and vendor error descriptions.
 - `src/device.rs` owns one asynchronous serial connection and transactions.
 - `src/serial.rs` runs the GUI serial worker and publishes snapshots through a
   Tokio watch channel.
@@ -16,8 +16,8 @@ broadcast receiver module. It targets Linux, Windows, and macOS.
 - `src/main.rs` selects the GUI when no subcommand is given and implements CLI
   operations otherwise.
 - `scripts/drm1000_simulator.py` provides a pseudo-terminal test double on Unix
-  for initialization, probe, tuning, volume, status/RSSI, progress, and CMX918
-  register-read transactions.
+  for initialization, probe, tuning, volume, persistent audio gain,
+  status/RSSI, progress, and CMX918 register-read transactions.
 
 ## Working Conventions
 
@@ -38,6 +38,14 @@ broadcast receiver module. It targets Linux, Windows, and macOS.
   The main receiver uses a separate nominal 3.1 V supply on pin 7. The host
   must not drive pin 33 before the module supply is stable.
 - Preserve the guarded register-write UX: GUI checkbox and CLI `--confirm`.
+- Preserve all bytes except offsets 35-37 when changing persistent DRM/AM/FM
+  audio gain. Gain writes must remain explicit and guarded because they update
+  flash, and the UI must state that a receiver restart is required.
+- If configuration read returns error 11, allow a write only after the user
+  separately chooses initialization from the complete DRM1000/2.2 defaults.
+  Never initialize persistent configuration during connect, probe, or read.
+- Do not present audio gain boost as RF gain. RF/IF gain uses the receiver's
+  mode-specific CMX918 AGC configuration and has no safe scalar control.
 - Update frequency and volume editors only when their corresponding readback
   generation changes. Periodic status snapshots must not overwrite active user
   edits. A dirty frequency draft remains authoritative until Tune is submitted.
@@ -70,7 +78,8 @@ cargo check --target x86_64-pc-windows-gnu
 
 Protocol tests should retain coverage for fragmented/noisy framing, the fixed
 409-byte status payload, scan label-table indexing, field-specific editor
-generations, and legacy scan completion.
+generations, persistent audio gain byte preservation, and legacy scan
+completion.
 
 ## Repository Hygiene
 

@@ -41,6 +41,7 @@ frame length (including the six-byte header), and optional payload data.
 | `22` | RSSI | none | IEEE-754 `f32` dBm |
 | `25` / `26` | Set/get screen state | boolean / none | state for get |
 | `27` | Scanner progress | none | percent byte |
+| `50` / `51` | Read/write persistent configuration | none / 255 bytes | 255 bytes for read |
 | `60` | Audio test tone | boolean | none |
 | `7F` | UART initialization | none | none |
 
@@ -49,9 +50,24 @@ The receiver reports AM or FM according to the tuned band. Consequently the
 GUI's FM button sends wide analogue mode, while the status packet remains the
 authority for the resulting demodulator mode.
 
+Persistent configuration bytes 35, 36, and 37 are signed DRM, AM, and FM audio
+gain values respectively, each in the range `-20` to `+20 dB`. A write must
+preserve all other bytes from a successful configuration read. New persistent
+settings take effect after a receiver restart. These audio settings are
+separate from the mode-specific CMX918 RF/IF AGC tables later in the same
+configuration block.
+
+Error 11 means the module has no valid stored configuration and is using its
+built-in defaults. A gain write cannot preserve unreadable bytes. The
+application therefore requires a separate explicit initialization choice and
+constructs all 255 bytes from the defaults in datasheet revision 2.2, including
+the MF capacitor LUT and all six CMX918 AGC profiles. Connection and discovery
+never perform this initialization.
+
 ## Safety
 
 CMX918 register writes are immediate and are not validated by the module. The
 GUI requires an enable checkbox for each write; the CLI requires `--confirm`.
+Persistent gain changes are also guarded because opcode `51` writes flash.
 Firmware flashing is not part of this UART command set and must not be guessed
 or attempted without the vendor's matching image and update procedure.

@@ -16,6 +16,11 @@ pub struct Drm1000App {
     frequency_generation: u64,
     volume: u8,
     volume_generation: u64,
+    audio_gains_db: [i8; 3],
+    audio_gain_generation: u64,
+    audio_gain_dirty: bool,
+    gain_write_armed: bool,
+    gain_initialize_defaults: bool,
     notice: Option<String>,
     register_address: String,
     register_value: String,
@@ -43,6 +48,11 @@ impl Drm1000App {
             frequency_generation: 0,
             volume: 50,
             volume_generation: 0,
+            audio_gains_db: [0; 3],
+            audio_gain_generation: 0,
+            audio_gain_dirty: false,
+            gain_write_armed: false,
+            gain_initialize_defaults: false,
             notice: None,
             register_address: "00".to_owned(),
             register_value: "00".to_owned(),
@@ -100,6 +110,11 @@ impl eframe::App for Drm1000App {
         let frequency_input_id = egui::Id::new("frequency_input");
         let frequency_has_focus = ctx.memory(|memory| memory.has_focus(frequency_input_id));
         if let Some(snapshot) = self.serial.try_snapshot() {
+            if snapshot.connected_port != self.snapshot.connected_port {
+                self.audio_gain_dirty = false;
+                self.gain_write_armed = false;
+                self.gain_initialize_defaults = false;
+            }
             if should_apply_readback(
                 self.frequency_generation,
                 snapshot.frequency_generation,
@@ -116,6 +131,19 @@ impl eframe::App for Drm1000App {
                     self.volume = volume;
                 }
                 self.volume_generation = snapshot.volume_generation;
+            }
+            if snapshot.audio_gain_generation != self.audio_gain_generation {
+                if let Some(gains) = snapshot.audio_gains_db {
+                    if !self.audio_gain_dirty {
+                        self.audio_gains_db = gains;
+                    } else if self.audio_gains_db == gains {
+                        self.audio_gain_dirty = false;
+                        self.gain_write_armed = false;
+                        self.notice =
+                            Some("Audio gain saved. Restart the DRM1000 to apply it.".to_owned());
+                    }
+                }
+                self.audio_gain_generation = snapshot.audio_gain_generation;
             }
             if self.selected_port.is_empty() {
                 if let Some(port) = snapshot.ports.iter().find(|port| port.likely_device) {
@@ -389,6 +417,73 @@ impl eframe::App for Drm1000App {
                     self.notice = Some("Audio test tone disabled".to_owned());
                 }
             });
+            ui.add_space(8.0);
+            ui.label(RichText::new("Audio gain boost").strong());
+            let gain_source_ready = self.snapshot.audio_gains_db.is_some()
+                || (self.snapshot.persistent_config_invalid && self.gain_initialize_defaults);
+            ui.add_enabled_ui(gain_source_ready, |ui| {
+                ui.horizontal(|ui| {
+                    for (index, label) in ["DRM", "AM", "FM"].into_iter().enumerate() {
+                        ui.label(label);
+                        if ui
+                            .add_sized(
+                                [120.0, 24.0],
+                                egui::Slider::new(&mut self.audio_gains_db[index], -20..=20)
+                                    .suffix(" dB"),
+                            )
+                            .changed()
+                        {
+                            self.audio_gain_dirty = true;
+                        }
+                    }
+                });
+            });
+            if self.snapshot.persistent_config_invalid {
+                ui.colored_label(
+                    Color32::from_rgb(238, 186, 72),
+                    "No stored configuration; the receiver is using built-in defaults.",
+                );
+                ui.checkbox(
+                    &mut self.gain_initialize_defaults,
+                    "Initialize all settings from DRM1000/2.2 defaults",
+                )
+                .on_hover_text(
+                    "Required before gain can be saved when no configuration can be read",
+                );
+            } else if self.snapshot.audio_gains_db.is_none() {
+                ui.label(
+                    RichText::new("Connect to read the saved gain configuration.")
+                        .small()
+                        .color(Color32::from_rgb(145, 158, 164)),
+                );
+            }
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.gain_write_armed, "Enable persistent gain write")
+                    .on_hover_text("Writes the complete preserved configuration to module flash");
+                let can_apply = self.gain_write_armed
+                    && self.audio_gain_dirty
+                    && gain_source_ready
+                    && self.snapshot.connected_port.is_some();
+                if ui
+                    .add_enabled(can_apply, egui::Button::new("Apply gain"))
+                    .on_hover_text("Saved gains take effect after the receiver restarts")
+                    .clicked()
+                {
+                    self.serial
+                        .set_audio_gains(self.audio_gains_db, self.gain_initialize_defaults);
+                    self.notice = Some("Saving audio gain configuration...".to_owned());
+                }
+                if ui
+                    .add_enabled(
+                        self.snapshot.connected_port.is_some(),
+                        egui::Button::new("Reload"),
+                    )
+                    .clicked()
+                {
+                    self.audio_gain_dirty = false;
+                    self.send(Request::new(opcode::PERSISTENT_DEVICE_CONFIG_READ));
+                }
+            });
             ui.add_space(16.0);
             ui.collapsing("CMX918 register access", |ui| {
                 ui.colored_label(
@@ -475,7 +570,8 @@ fn status_row(ui: &mut egui::Ui, name: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(name).color(Color32::from_rgb(145, 158, 164)));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(value);
+            ui.add(egui::Label::new(value).truncate())
+                .on_hover_text(value);
         });
     });
 }
