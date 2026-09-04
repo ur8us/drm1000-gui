@@ -142,11 +142,14 @@ Windows from a Linux host with MinGW-w64 installed:
 ./build-windows.sh
 ```
 
-macOS uses the native Apple Rust target:
+macOS must be built natively with Xcode Command Line Tools and Rust installed:
 
 ```bash
-cargo build --release --bin drm1000-gui
+./build-macos.sh
 ```
+
+The script builds for the Mac's current architecture and writes the executable
+to `target/release/drm1000-gui`.
 
 ## Development
 

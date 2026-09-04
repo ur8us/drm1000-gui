@@ -15,6 +15,9 @@ broadcast receiver module. It targets Linux, Windows, and macOS.
 - `src/app.rs` owns the `egui` interface and sends typed requests to the worker.
 - `src/main.rs` selects the GUI when no subcommand is given and implements CLI
   operations otherwise.
+- `build-linux.sh`, `build-windows.sh`, and `build-macos.sh` provide release
+  builds. The macOS script is intentionally native-only because it requires the
+  Apple SDK.
 - `scripts/drm1000_simulator.py` provides a pseudo-terminal test double on Unix
   for initialization, probe, tuning, volume, persistent audio gain,
   status/RSSI, progress, and CMX918 register-read transactions.
@@ -74,6 +77,7 @@ cargo fmt --check
 cargo test
 cargo check
 cargo check --target x86_64-pc-windows-gnu
+bash -n build-linux.sh build-windows.sh build-macos.sh
 ```
 
 Protocol tests should retain coverage for fragmented/noisy framing, the fixed
